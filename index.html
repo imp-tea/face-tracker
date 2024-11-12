@@ -122,13 +122,14 @@
     let faceCascade;
     let utils;
     let faces;
-    let minSize = new cv.Size(60, 60); // Ignore faces smaller than 60x60 pixels
+    let minSize; // Ignore faces smaller than 60x60 pixels
 
     // Poll every 100ms to check if OpenCV is loaded
     function checkOpenCVReady() {
         if (cv && cv.Mat) {
             console.log("OpenCV.js is ready.");
             openCVReady = true;
+            minSize = new cv.Size(60, 60);
             loadFaceCascade(); // Load the face cascade
             if (videoReady) {
                 startProcessing();
