@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Huddleston's Distance Grapher - Face Detection (Optimized)</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .left-side, .right-side {
+            flex: 1;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .left-side {
+            border-right: 1px solid #ccc;
+        }
+        .controls, .calibration-controls {
+            margin-top: 10px;
+            margin-bottom: 10px;
+        }
+        .controls label, .calibration-controls label {
+            margin-right: 5px;
+        }
+        video, canvas#canvasOutput {
+            width: 320px;
+            height: 240px;
+            border: 2px solid #333;
+        }
+        /* Hide the video element */
+        #videoElement {
+            display: none;
+        }
+        /* Style for right-side elements */
+        .graph-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        #distanceChart {
+            width: 100%;
+            max-height: 300px;
+        }
+        .graph-buttons {
+            margin-top: 10px;
+        }
+        .graph-buttons button {
+            margin-right: 5px;
+        }
+        .controls label {
+            display: inline-block;
+            margin-right: 5px;
+        }
+        /* Use CSS for mirroring */
+        #canvasOutput {
+            transform: scaleX(-1);
+        }
+    </style>
+    <!-- Load OpenCV.js from CDN with defer attribute -->
+    <script defer src="https://docs.opencv.org/3.4.0/opencv.js"></script>
+    <!-- Load Chart.js from CDN -->
+    <script defer src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<h2 style="text-align:center;">Huddleston's Distance Grapher - Face Detection (Optimized)</h2>
+
+<div class="container">
+    <div class="left-side">
+        <!-- Canvas element to show the processed video with distance overlay -->
+        <canvas id="canvasOutput"></canvas>
+
+        <div class="calibration-controls">
+            <label for="distanceInput">Distance from Camera (inches):</label>
+            <input type="number" id="distanceInput" name="distanceInput" value="24">
+            <br>
+            <label for="widthInput">Width of Face (inches):</label>
+            <input type="number" id="widthInput" name="widthInput" value="6">
+            <br>
+            <button id="calibrateButton">Calibrate!</button>
+        </div>
+
+        <!-- Video element to capture from webcam (hidden) -->
+        <video id="videoElement" autoplay playsinline></video>
+    </div>
+
+    <div class="right-side">
+        <div class="graph-container">
+            <canvas id="distanceChart"></canvas>
+            <div class="graph-buttons">
+                <button id="beginGraphingButton">Begin Graphing</button>
+                <button id="clearGraphButton">Clear Graph</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Main JavaScript for the tracker functionality -->
+<script>
+    // Global variables to track readiness
+    let videoReady = false;
+    let openCVReady = false;
+
+    // Calibration variables
+    let knownDistance = 24; // default value in inches
+    let realWidth = 6; // default value in inches (average face width)
+    let focalLength = null; // will be calculated during calibration
+
+    // Graphing variables
+    let chart; // Chart.js chart instance
+    let graphing = false; // Flag to indicate if graphing is active
+    let startTime = null; // Variable to track the start time of graphing
+    let dataBuffer = []; // Buffer to hold data points
+    let chartUpdateInterval = 1000; // Update chart every 1 second
+
+    // Face detection variables
+    let faceCascade;
+    let utils;
+    let faces;
+    let minSize = new cv.Size(60, 60); // Ignore faces smaller than 60x60 pixels
+
+    // Poll every 100ms to check if OpenCV is loaded
+    function checkOpenCVReady() {
+        if (cv && cv.Mat) {
+            console.log("OpenCV.js is ready.");
+            openCVReady = true;
+            loadFaceCascade(); // Load the face cascade
+            if (videoReady) {
+                startProcessing();
+            }
+        } else {
+            setTimeout(checkOpenCVReady, 100); // Retry every 100ms
+        }
+    }
+
+    // Load the face cascade
+    function loadFaceCascade() {
+        let faceCascadeFile = 'haarcascade_frontalface_default.xml';
+        faceCascade = new cv.CascadeClassifier();
+        utils = new Utils('errorMessage');
+        // The URL to the XML file
+        let faceCascadeUrl = 'haarcascade_frontalface_default.xml';
+        utils.createFileFromUrl(faceCascadeFile, faceCascadeUrl, () => {
+            faceCascade.load(faceCascadeFile);
+            console.log("Face cascade loaded");
+        });
+    }
+
+    // DOMContentLoaded event
+    document.addEventListener('DOMContentLoaded', function() {
+        console.log("DOM Content loaded...");
+        const video = document.getElementById('videoElement');
+        const calibrateButton = document.getElementById('calibrateButton');
+        const beginGraphingButton = document.getElementById('beginGraphingButton');
+        const clearGraphButton = document.getElementById('clearGraphButton');
+
+        // Access webcam
+        navigator.mediaDevices.getUserMedia({
+            video: {
+                width: { ideal: 320 },
+                height: { ideal: 240 }
+            }
+        })
+        .then(stream => {
+            video.srcObject = stream;
+            console.log("Video feed successfully accessed");
+        })
+        .catch(error => {
+            console.error("Error accessing the webcam: ", error);
+        });
+
+        // Wait for video to be ready
+        video.addEventListener('canplay', () => {
+            console.log("Video is ready to play");
+            videoReady = true;
+            if (openCVReady) {
+                startProcessing();
+            }
+        });
+
+        // Check OpenCV initialization
+        checkOpenCVReady();
+
+        // Add event listener to calibrate button
+        calibrateButton.addEventListener('click', calibrateCamera);
+
+        // Add event listeners for graphing buttons
+        beginGraphingButton.addEventListener('click', beginGraphing);
+        clearGraphButton.addEventListener('click', clearGraph);
+
+        // Initialize chart
+        initializeChart();
+    });
+
+    function startProcessing() {
+        const video = document.getElementById('videoElement');
+        const canvasOutput = document.getElementById('canvasOutput');
+        const canvasFrame = document.createElement('canvas');
+        // Using willReadFrequently attribute for better performance
+        const ctx = canvasFrame.getContext('2d', { willReadFrequently: true });
+
+        // Set canvas sizes to match video dimensions
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+        console.log("Video dimensions:", videoWidth, videoHeight);
+
+        canvasOutput.width = videoWidth;
+        canvasOutput.height = videoHeight;
+        canvasFrame.width = videoWidth;
+        canvasFrame.height = videoHeight;
+
+        const src = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
+        const gray = new cv.Mat();
+        faces = new cv.RectVector();
+
+        function processFrame() {
+            try {
+                // Draw the video frame to the offscreen canvas
+                ctx.drawImage(video, 0, 0, videoWidth, videoHeight);
+
+                let imageData = ctx.getImageData(0, 0, videoWidth, videoHeight);
+                src.data.set(imageData.data);
+
+                // Convert to grayscale
+                cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+                // Detect faces
+                faceCascade.detectMultiScale(
+                    gray,
+                    faces,
+                    1.2,      // Increased scaleFactor
+                    3,        // Decreased minNeighbors
+                    0,
+                    minSize,
+                    new cv.Size()
+                );
+
+                // Find the largest face
+                let maxArea = 0;
+                let largestFace = null;
+                for (let i = 0; i < faces.size(); i++) {
+                    let face = faces.get(i);
+                    let area = face.width * face.height;
+                    if (area > maxArea) {
+                        maxArea = area;
+                        largestFace = face;
+                    }
+                }
+
+                let distance = null;
+
+                if (largestFace != null) {
+                    let rect = largestFace;
+
+                    // Estimate distance based on face width
+                    if (focalLength !== null) {
+                        const observedWidth = rect.width;
+                        distance = (realWidth * focalLength) / observedWidth;
+                        distance = parseFloat(distance.toFixed(2)); // in inches
+                    } else {
+                        // If not calibrated, display message
+                        distance = null;
+                    }
+
+                    // Draw bounding box and distance text on the grayscale image
+                    cv.rectangle(gray, new cv.Point(rect.x, rect.y), new cv.Point(rect.x + rect.width, rect.y + rect.height), [0, 255, 0, 255], 2);
+                    cv.putText(gray, distance !== null ? distance + " inches" : "Not calibrated", new cv.Point(rect.x, rect.y - 10), cv.FONT_HERSHEY_SIMPLEX, 0.6, [0, 255, 0, 255]);
+                }
+
+                // If graphing is active and distance is valid
+                if (graphing && distance !== null) {
+                    let currentTime = (Date.now() - startTime) / 1000; // in seconds
+                    dataBuffer.push({
+                        x: parseFloat(currentTime.toFixed(2)),
+                        y: distance
+                    });
+                }
+
+                // Show the processed frame (grayscale)
+                cv.imshow('canvasOutput', gray);
+
+                // Clear faces for reuse
+                faces.clear();
+
+            } catch (err) {
+                console.error("Error in processing frame:", err);
+            } finally {
+                setTimeout(processFrame, 100); // Process every 100ms
+            }
+        }
+
+        // Start processing frames
+        setTimeout(processFrame, 0);
+
+        // Update chart at intervals
+        setInterval(() => {
+            if (dataBuffer.length > 0) {
+                chart.data.datasets[0].data.push(...dataBuffer);
+                chart.update();
+                dataBuffer = [];
+            }
+        }, chartUpdateInterval);
+    }
+
+    function calibrateCamera() {
+        const video = document.getElementById('videoElement');
+        const canvasFrame = document.createElement('canvas');
+        const ctx = canvasFrame.getContext('2d', { willReadFrequently: true });
+
+        // Get user inputs
+        const distanceInput = document.getElementById('distanceInput');
+        const widthInput = document.getElementById('widthInput');
+
+        knownDistance = parseFloat(distanceInput.value);
+        realWidth = parseFloat(widthInput.value);
+
+        if (isNaN(knownDistance) || isNaN(realWidth)) {
+            alert("Please enter valid numbers for distance and width.");
+            return;
+        }
+
+        // Capture current frame and process
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+
+        canvasFrame.width = videoWidth;
+        canvasFrame.height = videoHeight;
+
+        const src = new cv.Mat(videoHeight, videoWidth, cv.CV_8UC4);
+        const gray = new cv.Mat();
+
+        // Draw the video frame to the offscreen canvas
+        ctx.drawImage(video, 0, 0, videoWidth, videoHeight);
+        let imageData = ctx.getImageData(0, 0, videoWidth, videoHeight);
+        src.data.set(imageData.data);
+
+        // Convert to grayscale
+        cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+
+        // Detect faces
+        let faces = new cv.RectVector();
+        faceCascade.detectMultiScale(
+            gray,
+            faces,
+            1.2,      // Increased scaleFactor
+            3,        // Decreased minNeighbors
+            0,
+            minSize,
+            new cv.Size()
+        );
+
+        // Find the largest face
+        let maxArea = 0;
+        let largestFace = null;
+        for (let i = 0; i < faces.size(); i++) {
+            let face = faces.get(i);
+            let area = face.width * face.height;
+            if (area > maxArea) {
+                maxArea = area;
+                largestFace = face;
+            }
+        }
+
+        if (largestFace != null) {
+            const observedWidth = largestFace.width;
+
+            // Calculate focal length
+            focalLength = (observedWidth * knownDistance) / realWidth;
+            alert("Calibration successful!");
+
+        } else {
+            alert("No face detected during calibration. Please make sure your face is visible and try again.");
+        }
+
+        // Clean up
+        src.delete();
+        gray.delete();
+        faces.delete();
+    }
+
+    function initializeChart() {
+        const ctx = document.getElementById('distanceChart').getContext('2d');
+        chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                datasets: [{
+                    label: 'Distance (inches)',
+                    data: [],
+                    borderColor: 'blue',
+                    fill: false,
+                    pointRadius: 2,
+                    pointHoverRadius: 5
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false, // Disable animations
+                scales: {
+                    x: {
+                        title: {
+                            display: true,
+                            text: 'Time (seconds)'
+                        },
+                        type: 'linear',
+                        position: 'bottom',
+                        ticks: {
+                            autoSkip: true,
+                            maxTicksLimit: 10
+                        }
+                    },
+                    y: {
+                        title: {
+                            display: true,
+                            text: 'Distance (inches)'
+                        },
+                        beginAtZero: true,
+                        ticks: {
+                            autoSkip: true,
+                            maxTicksLimit: 10
+                        }
+                    }
+                }
+            }
+        });
+        // Add event listener for double-clicks on data points
+        chart.canvas.addEventListener('dblclick', function(event) {
+            const points = chart.getElementsAtEventForMode(event, 'nearest', { intersect: true }, false);
+
+            if (points.length) {
+                const pointIndex = points[0].index;
+                // Remove the data point
+                chart.data.datasets[0].data.splice(pointIndex, 1);
+                chart.update();
+            }
+        });
+    }
+
+    function beginGraphing() {
+        if (!graphing) {
+            graphing = true;
+            startTime = Date.now();
+            chart.data.datasets[0].data = [];
+            chart.update();
+            document.getElementById('beginGraphingButton').textContent = 'Stop Graphing';
+        } else {
+            graphing = false;
+            document.getElementById('beginGraphingButton').textContent = 'Begin Graphing';
+        }
+    }
+
+    function clearGraph() {
+        graphing = false;
+        document.getElementById('beginGraphingButton').textContent = 'Begin Graphing';
+        chart.data.datasets[0].data = [];
+        chart.update();
+    }
+
+    // Utils class to handle file loading
+    class Utils {
+        constructor() {}
+        createFileFromUrl(path, url, callback) {
+            let request = new XMLHttpRequest();
+            request.open('GET', url, true);
+            request.responseType = 'arraybuffer';
+
+            request.onload = function(ev) {
+                if (request.readyState === 4) {
+                    if (request.status === 200 || request.status === 0) {
+                        let data = new Uint8Array(request.response);
+                        cv.FS_createDataFile('/', path, data, true, false, false);
+                        callback();
+                    } else {
+                        console.log('Failed to load ' + url + ' status: ' + request.status);
+                    }
+                }
+            };
+            request.send();
+        }
+    }
+</script>
+
+</body>
+</html>
